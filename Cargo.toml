@@ -1,0 +1,15 @@
+[package]
+name = "pop-tiler"
+description = "Generic tiling window manager library"
+license = "LGPL-3.0-only"
+version = "0.1.0"
+edition = "2018"
+
+[workspace]
+members = [ "service" ]
+
+[dependencies]
+derive_more = "0.99"
+ghost-cell = "0.2"
+tracing = "0.1"
+ward = "2"
