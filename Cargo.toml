@@ -1,0 +1,25 @@
+# Copyright 2021 System76 <info@system76.com>
+# SPDX-License-Identifier: MPL-2.0
+
+[package]
+name = "pop-tiler"
+description = "Generic tiling window manager library"
+license = "MPL-2.0"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = [ "ipc", "service" ]
+
+[dependencies]
+derive_more = "0.99"
+either = "1.6"
+ghost-cell = "0.2"
+qcell = "0.4.2"
+serde = { version = "1.0", optional = true, features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = "0.2"
+ward = "2"
+
+[features]
+ipc = ["serde"]

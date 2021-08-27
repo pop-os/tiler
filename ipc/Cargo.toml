@@ -1,0 +1,14 @@
+# Copyright 2021 System76 <info@system76.com>
+# SPDX-License-Identifier: GPL-3.0-only
+
+[package]
+name = "pop-tiler-ipc"
+license = "GPL-3.0-only"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+pop-tiler = { path = "../", features = ["ipc"] }
+pop-tiler-service = { path = "../service", features = ["ipc"]}
+serde_json = "1.0.68"
+ghost-cell = "0.2.2"
