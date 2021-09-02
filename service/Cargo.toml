@@ -10,3 +10,7 @@ async-channel = "1.6.1"
 thiserror = "1.0.28"
 ghost-cell = "0.2"
 pop-tiler = { path = "../" }
+
+[dev-dependencies]
+glib = "0.14.5"
+gtk = "0.14.1"
