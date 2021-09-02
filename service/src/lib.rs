@@ -24,6 +24,7 @@ pub enum Error {
 }
 
 /// An instruction to send to the pop-tiling service
+#[derive(Debug)]
 pub enum Request {
     Attach { window: WindowID, display: u32 },
     Detach(WindowID),
