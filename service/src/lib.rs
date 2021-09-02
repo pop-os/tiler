@@ -4,6 +4,7 @@
 use async_channel::{Receiver, RecvError, SendError, Sender};
 use ghost_cell::GhostToken;
 use pop_tiler::*;
+use std::thread;
 use thiserror::Error as ThisError;
 
 pub type Response = Vec<Event>;
@@ -54,7 +55,7 @@ impl Client {
         Self { send, recv }
     }
     /// Sends an instruction to pop-tiler, then waits for the response.
-    pub async fn handle(&mut self, input: Request) -> Result<Response, Error> {
+    pub async fn handle(&self, input: Request) -> Result<Response, Error> {
         self.send.send(input).await.map_err(Error::ClientRequest)?;
 
         self.recv.recv().await.map_err(Error::ClientResponse)
@@ -154,5 +155,58 @@ impl<'g> Server<'g> {
                 .await
                 .map_err(Error::ServerResponse)?;
         }
+    }
+}
+
+/// Manages a thread running the pop-tiler service on it, and all communication to it.
+///
+/// On drop of a value of this type, the background thread will be stopped.
+pub struct TilerThread {
+    client: Client,
+
+    // On drop, a signal will be sent here to stop the background thread.
+    drop_tx: async_oneshot::Sender<()>,
+}
+
+impl Default for TilerThread {
+    fn default() -> Self {
+        let (client_send, server_recv) = async_channel::unbounded();
+        let (server_send, client_recv) = async_channel::unbounded();
+        let (drop_tx, drop_rx) = async_oneshot::oneshot();
+
+        let client = Client::new(client_send, client_recv);
+
+        thread::spawn(move || {
+            ghost_cell::GhostToken::new(|t| {
+                // Tiling service as a future.
+                let service = async move {
+                    if let Err(why) = Server::new(server_recv, server_send, t).run().await {
+                        eprintln!("pop-tiler service exited with error: {}", why);
+                    }
+                };
+
+                // If the type is dropped, a message will be received that stops the service.
+                let drop = async move {
+                    let _ = drop_rx.await;
+                };
+
+                async_io::block_on(futures_lite::future::or(drop, service));
+            })
+        });
+
+        Self { client, drop_tx }
+    }
+}
+
+impl TilerThread {
+    /// Submits a request to the pop-tiling service managed by this type.
+    pub async fn handle(&self, request: Request) -> Result<Response, Error> {
+        self.client.handle(request).await
+    }
+}
+
+impl Drop for TilerThread {
+    fn drop(&mut self) {
+        let _ = self.drop_tx.send(());
     }
 }
