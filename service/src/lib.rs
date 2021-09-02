@@ -45,31 +45,40 @@ pub enum Request {
 
 /// Handle for sending and receiving instructions to and from the pop-tiler.
 pub struct Client {
-    client_send: Sender<Request>,
-    client_recv: Receiver<Response>,
+    send: Sender<Request>,
+    recv: Receiver<Response>,
 }
 
 impl Client {
+    pub fn new(send: Sender<Request>, recv: Receiver<Response>) -> Self {
+        Self { send, recv }
+    }
     /// Sends an instruction to pop-tiler, then waits for the response.
     pub async fn handle(&mut self, input: Request) -> Result<Response, Error> {
-        self.client_send
-            .send(input)
-            .await
-            .map_err(Error::ClientRequest)?;
+        self.send.send(input).await.map_err(Error::ClientRequest)?;
 
-        self.client_recv.recv().await.map_err(Error::ClientResponse)
+        self.recv.recv().await.map_err(Error::ClientResponse)
     }
 }
 
 /// The pop-tiling service, which you can spawn in a separate thread / local async task
 pub struct Server<'g> {
-    server_recv: Receiver<Request>,
-    server_send: Sender<Response>,
+    recv: Receiver<Request>,
+    send: Sender<Response>,
     tiler: Tiler<'g>,
     t: GhostToken<'g>,
 }
 
 impl<'g> Server<'g> {
+    pub fn new(recv: Receiver<Request>, send: Sender<Response>, t: GhostToken<'g>) -> Self {
+        Self {
+            recv,
+            send,
+            t,
+            tiler: Tiler::default(),
+        }
+    }
+
     fn handle(&mut self, input: Request) -> Response {
         let &mut Self {
             ref mut tiler,
@@ -136,35 +145,14 @@ impl<'g> Server<'g> {
     /// Starts an async event loop which will begin listening for instructions.
     pub async fn run(&mut self) -> Result<(), Error> {
         loop {
-            let input = self
-                .server_recv
-                .recv()
-                .await
-                .map_err(Error::ServerRequest)?;
+            let input = self.recv.recv().await.map_err(Error::ServerRequest)?;
 
             let output = self.handle(input);
 
-            self.server_send
+            self.send
                 .send(output)
                 .await
                 .map_err(Error::ServerResponse)?;
         }
     }
-}
-
-pub async fn create_client_and_server(t: GhostToken<'_>) -> (Client, Server<'_>) {
-    let (client_send, server_recv) = async_channel::unbounded();
-    let (server_send, client_recv) = async_channel::unbounded();
-    (
-        Client {
-            client_send,
-            client_recv,
-        },
-        Server {
-            server_recv,
-            server_send,
-            tiler: Tiler::default(),
-            t,
-        },
-    )
 }
