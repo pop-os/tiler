@@ -368,10 +368,7 @@ mod debug {
 
     impl<'a, T> Debug for ForkDebug<'a, T> {
         fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-            fn as_debug<'a, T>(
-                branch: &'a Branch<T>,
-                t: &'a TCellOwner<T>,
-            ) -> Box<dyn Debug + 'a> {
+            fn as_debug<'a, T>(branch: &'a Branch<T>, t: &'a TCellOwner<T>) -> Box<dyn Debug + 'a> {
                 match branch {
                     Branch::Window(window) => Box::new(window.id(t)),
                     Branch::Stack(stack) => Box::new(stack.ro(t).debug(t)),

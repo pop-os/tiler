@@ -206,7 +206,10 @@ impl<T: 'static> EventQueue<T> {
 
     /// Instruct the window manager about this fork's dimensions and split handle.
     pub fn fork_update(&mut self, fork: &ForkPtr<T>, t: &TCellOwner<T>) {
-        self.forks.entry(Rc::as_ptr(fork) as usize).or_default().update = Some({
+        self.forks
+            .entry(Rc::as_ptr(fork) as usize)
+            .or_default()
+            .update = Some({
             let fork = fork.ro(t);
             ForkUpdate {
                 workspace: fork.workspace,
@@ -218,12 +221,7 @@ impl<T: 'static> EventQueue<T> {
     }
 
     /// Instruct the window manager that a window was assigned to a stack.
-    pub fn stack_assign(
-        &mut self,
-        stack: &StackPtr<T>,
-        window: &WindowPtr<T>,
-        t: &TCellOwner<T>,
-    ) {
+    pub fn stack_assign(&mut self, stack: &StackPtr<T>, window: &WindowPtr<T>, t: &TCellOwner<T>) {
         *self
             .stacks
             .entry(Rc::as_ptr(stack) as usize)
@@ -234,12 +232,7 @@ impl<T: 'static> EventQueue<T> {
     }
 
     /// Instruct the window manager that a window was detached from a stack.
-    pub fn stack_detach(
-        &mut self,
-        stack: &StackPtr<T>,
-        window: &WindowPtr<T>,
-        t: &TCellOwner<T>,
-    ) {
+    pub fn stack_detach(&mut self, stack: &StackPtr<T>, window: &WindowPtr<T>, t: &TCellOwner<T>) {
         *self
             .stacks
             .entry(Rc::as_ptr(stack) as usize)

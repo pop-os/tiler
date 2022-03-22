@@ -13,8 +13,7 @@ use std::rc::Rc;
 
 /// An ID assigned to a window by a window manager.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
-#[derive(From, Into)]
+#[derive(Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, From, Into)]
 pub struct WindowID(pub u32, pub u32);
 
 /// Pointer to reference-counted window managed by a `TCell`.
@@ -146,12 +145,7 @@ impl<T: 'static> WindowPtr<T> {
     }
 
     /// Update the position and dimensions of this window.
-    pub(crate) fn work_area_update(
-        &self,
-        tiler: &mut Tiler<T>,
-        area: Rect,
-        t: &mut TCellOwner<T>,
-    ) {
+    pub(crate) fn work_area_update(&self, tiler: &mut Tiler<T>, area: Rect, t: &mut TCellOwner<T>) {
         let this = self.rw(t);
         if this.rect != area {
             this.rect = area;
