@@ -24,3 +24,5 @@ pub use self::geom::{Point, Rect};
 pub use self::stack::StackMovement;
 pub use self::tiler::Tiler;
 pub use self::window::{WindowID, WindowPtr};
+
+pub use qcell::TCellOwner;

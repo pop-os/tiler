@@ -6,25 +6,42 @@ use crate::stack::StackPtr;
 use crate::window::WindowPtr;
 use crate::Rect;
 use crate::Tiler;
-use ghost_cell::GhostToken;
+use qcell::TCellOwner;
 use std::rc::Rc;
 
-#[derive(Clone)]
-pub(crate) enum Branch<'g> {
-    Window(WindowPtr<'g>),
-    Fork(ForkPtr<'g>),
-    Stack(StackPtr<'g>),
+pub(crate) enum Branch<T: 'static> {
+    Window(WindowPtr<T>),
+    Fork(ForkPtr<T>),
+    Stack(StackPtr<T>),
+}
+impl<T: 'static> Clone for Branch<T> {
+    fn clone(&self) -> Branch<T> {
+        match self {
+            Branch::Window(w) => Branch::Window(w.clone()),
+            Branch::Fork(f) => Branch::Fork(f.clone()),
+            Branch::Stack(s) => Branch::Stack(s.clone()),
+        }
+    }
 }
 
-#[derive(Copy, Clone)]
-pub(crate) enum BranchRef<'a, 'g> {
-    Window(&'a WindowPtr<'g>),
-    Fork(&'a ForkPtr<'g>),
-    Stack(&'a StackPtr<'g>),
+pub(crate) enum BranchRef<'a, T: 'static> {
+    Window(&'a WindowPtr<T>),
+    Fork(&'a ForkPtr<T>),
+    Stack(&'a StackPtr<T>),
 }
+impl<'a, T: 'static> Clone for BranchRef<'a, T> {
+    fn clone(&self) -> BranchRef<'a, T> {
+        match self {
+            BranchRef::Window(w) => BranchRef::Window(w),
+            BranchRef::Fork(f) => BranchRef::Fork(f),
+            BranchRef::Stack(s) => BranchRef::Stack(s),
+        }
+    }
+}
+impl<'a, T: 'static> Copy for BranchRef<'a, T> {}
 
-impl<'g> Branch<'g> {
-    pub fn work_area_update(&self, tiler: &mut Tiler<'g>, area: Rect, t: &mut GhostToken<'g>) {
+impl<T: 'static> Branch<T> {
+    pub fn work_area_update(&self, tiler: &mut Tiler<T>, area: Rect, t: &mut TCellOwner<T>) {
         match self {
             Branch::Fork(ptr) => ptr.work_area_update(tiler, area, t),
             Branch::Stack(ptr) => ptr.work_area_update(tiler, area, t),
@@ -32,7 +49,7 @@ impl<'g> Branch<'g> {
         }
     }
 
-    pub fn ref_eq<'a>(&self, other: BranchRef<'a, 'g>) -> bool {
+    pub fn ref_eq<'a>(&self, other: BranchRef<'a, T>) -> bool {
         match (self, other) {
             (Branch::Window(a), BranchRef::Window(b)) => Rc::ptr_eq(a, b),
             (Branch::Fork(a), BranchRef::Fork(b)) => Rc::ptr_eq(a, b),
@@ -42,7 +59,7 @@ impl<'g> Branch<'g> {
     }
 }
 
-impl<'g> PartialEq for Branch<'g> {
+impl<T: 'static> PartialEq for Branch<T> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Branch::Window(a), Branch::Window(b)) => Rc::ptr_eq(a, b),

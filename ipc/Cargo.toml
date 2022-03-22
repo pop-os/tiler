@@ -11,4 +11,3 @@ edition = "2018"
 pop-tiler = { path = "../", features = ["ipc"] }
 pop-tiler-service = { path = "../service", features = ["ipc"]}
 serde_json = "1.0.68"
-ghost-cell = "0.2.2"

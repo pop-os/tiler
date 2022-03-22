@@ -7,7 +7,7 @@ use super::branch::{Branch, BranchRef};
 use super::window::WindowPtr;
 use crate::{Rect, Tiler};
 use either::Either;
-use ghost_cell::{GhostCell, GhostToken};
+use qcell::{TCell, TCellOwner};
 use std::rc::Rc;
 
 /// The orientation of a fork.
@@ -18,21 +18,26 @@ pub enum Orientation {
     Vertical,
 }
 
-#[derive(Clone, Deref, DerefMut, From)]
-pub(crate) struct ForkPtr<'g>(Rc<GhostCell<'g, Fork<'g>>>);
+#[derive(Deref, DerefMut, From)]
+pub(crate) struct ForkPtr<T: 'static>(Rc<TCell<T, Fork<T>>>);
+impl<T: 'static> Clone for ForkPtr<T> {
+    fn clone(&self) -> ForkPtr<T> {
+        ForkPtr(self.0.clone())
+    }
+}
 
-impl<'g> ForkPtr<'g> {
-    pub fn new(fork: Fork<'g>) -> Self {
-        Self(Rc::new(GhostCell::new(fork)))
+impl<T: 'static> ForkPtr<T> {
+    pub fn new(fork: Fork<T>) -> Self {
+        Self(Rc::new(TCell::new(fork)))
     }
 
     /// Locates the largest window in the fork, walking all of its branches.
-    pub fn largest_window(&self, t: &GhostToken<'g>) -> Option<WindowPtr<'g>> {
+    pub fn largest_window(&self, t: &TCellOwner<T>) -> Option<WindowPtr<T>> {
         let mut largest_area = 0;
         let mut largest_window = None;
 
-        let mut compare_window = |window: &WindowPtr<'g>| {
-            let area = window.borrow(t).rect.area();
+        let mut compare_window = |window: &WindowPtr<T>| {
+            let area = window.ro(t).rect.area();
 
             if area > largest_area {
                 largest_area = area;
@@ -50,11 +55,11 @@ impl<'g> ForkPtr<'g> {
     /// Change the orientation of the fork, if it differs.
     pub fn orientation_set(
         &self,
-        tiler: &mut Tiler<'g>,
+        tiler: &mut Tiler<T>,
         orientation: Orientation,
-        t: &mut GhostToken<'g>,
+        t: &mut TCellOwner<T>,
     ) {
-        if self.borrow(t).orientation == orientation {
+        if self.ro(t).orientation == orientation {
             return;
         }
 
@@ -62,8 +67,8 @@ impl<'g> ForkPtr<'g> {
     }
 
     /// Resets the orientation and split handle of this fork.
-    pub fn reset_orientation(&self, tiler: &mut Tiler<'g>, t: &mut GhostToken<'g>) {
-        let this = self.borrow_mut(t);
+    pub fn reset_orientation(&self, tiler: &mut Tiler<T>, t: &mut TCellOwner<T>) {
+        let this = self.rw(t);
 
         this.split_handle = match this.orientation {
             Orientation::Horizontal => this.area.width / 2,
@@ -78,8 +83,8 @@ impl<'g> ForkPtr<'g> {
     }
 
     /// Resize a fork with a new split
-    pub fn resize(&self, tiler: &mut Tiler<'g>, split: u32, t: &mut GhostToken<'g>) {
-        let this = self.borrow_mut(t);
+    pub fn resize(&self, tiler: &mut Tiler<T>, split: u32, t: &mut TCellOwner<T>) {
+        let this = self.rw(t);
 
         let area = this.area;
         this.split_handle = match this.orientation {
@@ -91,8 +96,8 @@ impl<'g> ForkPtr<'g> {
     }
 
     /// Toggle the orientation of the fork
-    pub fn toggle_orientation(&self, tiler: &mut Tiler<'g>, t: &mut GhostToken<'g>) {
-        let this = self.borrow_mut(t);
+    pub fn toggle_orientation(&self, tiler: &mut Tiler<T>, t: &mut TCellOwner<T>) {
+        let this = self.rw(t);
 
         this.split_handle = match this.orientation {
             Orientation::Horizontal => {
@@ -121,8 +126,8 @@ impl<'g> ForkPtr<'g> {
     }
 
     /// Swaps a window owned by this fork with a different window.
-    pub fn swap(&self, our: &WindowPtr<'g>, their: &WindowPtr<'g>, t: &mut GhostToken<'g>) {
-        let this = self.borrow_mut(t);
+    pub fn swap(&self, our: &WindowPtr<T>, their: &WindowPtr<T>, t: &mut TCellOwner<T>) {
+        let this = self.rw(t);
         if let Branch::Window(ref mut window) = this.left {
             if Rc::ptr_eq(window, our) {
                 this.left = Branch::Window(their.clone());
@@ -138,10 +143,10 @@ impl<'g> ForkPtr<'g> {
     }
 
     /// Generator which locates all windows in this fork, but does allocate.
-    pub fn windows<'a>(&self, t: &'a GhostToken<'g>) -> impl Iterator<Item = WindowPtr<'g>> + 'a {
-        let mut forks: Vec<ForkPtr> = vec![self.clone()];
-        let mut branches: Vec<Branch> = Vec::new();
-        let mut windows: Vec<WindowPtr<'g>> = Vec::new();
+    pub fn windows<'a>(&self, t: &'a TCellOwner<T>) -> impl Iterator<Item = WindowPtr<T>> + 'a {
+        let mut forks: Vec<ForkPtr<T>> = vec![self.clone()];
+        let mut branches: Vec<Branch<T>> = Vec::new();
+        let mut windows: Vec<WindowPtr<T>> = Vec::new();
 
         std::iter::from_fn(move || {
             loop {
@@ -160,16 +165,16 @@ impl<'g> ForkPtr<'g> {
                         }
 
                         Branch::Stack(stack) => {
-                            windows.extend_from_slice(&stack.borrow(t).windows);
+                            windows.extend_from_slice(&stack.ro(t).windows);
                             return windows.pop();
                         }
                     }
                 }
 
                 if let Some(fork) = forks.pop() {
-                    branches.push(fork.borrow(t).left.clone());
+                    branches.push(fork.ro(t).left.clone());
 
-                    if let Some(right) = fork.borrow(t).right.clone() {
+                    if let Some(right) = fork.ro(t).right.clone() {
                         branches.push(right);
                     }
 
@@ -184,20 +189,20 @@ impl<'g> ForkPtr<'g> {
     }
 
     /// Recalculate the work areas of the fork's branches.
-    pub fn work_area_refresh(&self, tiler: &mut Tiler<'g>, t: &mut GhostToken<'g>) {
-        self.work_area_update(tiler, self.borrow(t).area, t)
+    pub fn work_area_refresh(&self, tiler: &mut Tiler<T>, t: &mut TCellOwner<T>) {
+        self.work_area_update(tiler, self.ro(t).area, t)
     }
 
     /// Update the work area of the fork and its branches.
     #[allow(clippy::many_single_char_names)]
-    pub fn work_area_update(&self, tiler: &mut Tiler<'g>, area: Rect, t: &mut GhostToken<'g>) {
+    pub fn work_area_update(&self, tiler: &mut Tiler<T>, area: Rect, t: &mut TCellOwner<T>) {
         tracing::debug!("assigning fork to {:?}", area);
         let mut left_rect = area;
-        let left_branch: Branch<'g>;
-        let mut right_branch: Option<(Branch<'g>, Rect)> = None;
+        let left_branch: Branch<T>;
+        let mut right_branch: Option<(Branch<T>, Rect)> = None;
 
         {
-            let this = self.borrow_mut(t);
+            let this = self.rw(t);
 
             // Update the location of the split in the fork
             this.split_handle = match this.orientation {
@@ -248,7 +253,7 @@ impl<'g> ForkPtr<'g> {
         tiler.event_queue.fork_update(self, t);
     }
 
-    pub fn debug<'a>(&'a self, t: &'a GhostToken<'g>) -> ForkDebug<'a, 'g> {
+    pub fn debug<'a>(&'a self, t: &'a TCellOwner<T>) -> ForkDebug<'a, T> {
         ForkDebug::new(self, t)
     }
 }
@@ -257,18 +262,18 @@ impl<'g> ForkPtr<'g> {
 ///
 /// A branch may contain a window, a stack, or another fork. The dimensions of a fork are
 /// split between the two branches vertically or horizontally.
-pub(crate) struct Fork<'g> {
+pub(crate) struct Fork<T: 'static> {
     /// The position and dimensions of this fork and its children.
     pub area: Rect,
 
     /// Pointer to the parent of this fork.
-    pub parent: Option<ForkPtr<'g>>,
+    pub parent: Option<ForkPtr<T>>,
 
     /// The left branch, which is only permitted to be a Fork if the right branch is also allocated.
-    pub left: Branch<'g>,
+    pub left: Branch<T>,
 
     /// Right branch, which may be empty.
-    pub right: Option<Branch<'g>>,
+    pub right: Option<Branch<T>>,
 
     /// The ID of the workspace that the fork is attached to.
     pub workspace: u32,
@@ -283,8 +288,8 @@ pub(crate) struct Fork<'g> {
     pub orientation_toggled: bool,
 }
 
-impl<'g> Fork<'g> {
-    pub fn new(area: Rect, left: Branch<'g>, workspace: u32) -> Self {
+impl<T: 'static> Fork<T> {
+    pub fn new(area: Rect, left: Branch<T>, workspace: u32) -> Self {
         let orientation = preferred_orientation(area);
 
         let split_handle = match orientation {
@@ -306,8 +311,8 @@ impl<'g> Fork<'g> {
 
     pub fn branch(
         &mut self,
-        branch: BranchRef<'_, 'g>,
-    ) -> Option<Either<&mut Branch<'g>, &mut Branch<'g>>> {
+        branch: BranchRef<'_, T>,
+    ) -> Option<Either<&mut Branch<T>, &mut Branch<T>>> {
         if self.left_is(branch) {
             return Some(Either::Left(&mut self.left));
         }
@@ -321,16 +326,16 @@ impl<'g> Fork<'g> {
         None
     }
 
-    pub fn left_is(&self, branch: BranchRef<'_, 'g>) -> bool {
+    pub fn left_is(&self, branch: BranchRef<'_, T>) -> bool {
         self.left.ref_eq(branch)
     }
 
-    pub fn right_is(&self, branch: BranchRef<'_, 'g>) -> bool {
+    pub fn right_is(&self, branch: BranchRef<'_, T>) -> bool {
         self.right.as_ref().map_or(false, |r| r.ref_eq(branch))
     }
 }
 
-impl<'g> Drop for Fork<'g> {
+impl<T: 'static> Drop for Fork<T> {
     fn drop(&mut self) {
         tracing::debug!("dropped fork");
     }
@@ -346,41 +351,39 @@ fn preferred_orientation(rect: Rect) -> Orientation {
 
 mod debug {
     use super::{Branch, ForkPtr};
-    use ghost_cell::GhostToken;
+    use qcell::TCellOwner;
     use std::fmt::{self, Debug};
+    use std::rc::Rc;
 
-    pub(crate) struct ForkDebug<'a, 'g> {
-        pub fork: &'a ForkPtr<'g>,
-        pub t: &'a GhostToken<'g>,
+    pub(crate) struct ForkDebug<'a, T: 'static> {
+        pub fork: &'a ForkPtr<T>,
+        pub t: &'a TCellOwner<T>,
     }
 
-    impl<'a, 'g> ForkDebug<'a, 'g> {
-        pub fn new(fork: &'a ForkPtr<'g>, t: &'a GhostToken<'g>) -> Self {
+    impl<'a, T> ForkDebug<'a, T> {
+        pub fn new(fork: &'a ForkPtr<T>, t: &'a TCellOwner<T>) -> Self {
             Self { fork, t }
         }
     }
 
-    impl<'a, 'g> Debug for ForkDebug<'a, 'g> {
+    impl<'a, T> Debug for ForkDebug<'a, T> {
         fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-            fn as_debug<'a, 'g>(
-                branch: &'a Branch<'g>,
-                t: &'a GhostToken<'g>,
-            ) -> Box<dyn Debug + 'a> {
+            fn as_debug<'a, T>(branch: &'a Branch<T>, t: &'a TCellOwner<T>) -> Box<dyn Debug + 'a> {
                 match branch {
                     Branch::Window(window) => Box::new(window.id(t)),
-                    Branch::Stack(stack) => Box::new(stack.borrow(t).debug(t)),
+                    Branch::Stack(stack) => Box::new(stack.ro(t).debug(t)),
                     Branch::Fork(fork) => Box::new(fork.debug(t)),
                 }
             }
 
-            let fork = self.fork.borrow(self.t);
+            let fork = self.fork.ro(self.t);
 
-            let left = self.fork.borrow(self.t).parent.as_ref().map(|p| p.as_ptr());
+            let left = self.fork.ro(self.t).parent.as_ref().map(|p| Rc::as_ptr(&p));
 
             let right = fork.right.as_ref().map(|branch| as_debug(branch, self.t));
 
             fmt.debug_struct("Fork")
-                .field("ptr", &self.fork.as_ptr())
+                .field("ptr", &Rc::as_ptr(self.fork))
                 .field("parent", &left)
                 .field("orientation", &fork.orientation)
                 .field("left", &as_debug(&fork.left, self.t))
