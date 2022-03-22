@@ -5,8 +5,9 @@ use crate::fork::ForkPtr;
 use crate::stack::{StackMovement, StackPtr};
 use crate::window::WindowPtr;
 use crate::{Orientation, Rect, WindowID};
-use ghost_cell::GhostToken;
+use qcell::TCellOwner;
 use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 
 /// Instructs where to place a tiling component entity.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -101,15 +102,27 @@ pub struct StackEvents {
     pub raise: Option<WindowID>,
 }
 
-#[derive(Default)]
-pub(crate) struct EventQueue {
+pub(crate) struct EventQueue<T: 'static> {
     pub(crate) forks: BTreeMap<usize, ForkEvents>,
     pub(crate) windows: HashMap<WindowID, WindowEvents>,
     pub(crate) stacks: BTreeMap<usize, StackEvents>,
     pub(crate) events: Vec<Event>,
+    _marker: std::marker::PhantomData<T>,
 }
 
-impl EventQueue {
+impl<T: 'static> Default for EventQueue<T> {
+    fn default() -> EventQueue<T> {
+        EventQueue {
+            forks: BTreeMap::new(),
+            windows: HashMap::new(),
+            stacks: BTreeMap::new(),
+            events: Vec::new(),
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T: 'static> EventQueue<T> {
     pub fn consume_events(&mut self) -> impl Iterator<Item = Event> + '_ {
         let fork_events = {
             let mut forks = BTreeMap::new();
@@ -183,18 +196,18 @@ impl EventQueue {
     }
 
     /// Instruct the window manager that this fork was destroyed.
-    pub fn fork_destroy<'g>(&mut self, fork: &ForkPtr<'g>) {
-        tracing::debug!("destroying Fork({:?})", fork.as_ptr());
+    pub fn fork_destroy(&mut self, fork: &ForkPtr<T>) {
+        tracing::debug!("destroying Fork({:?})", Rc::as_ptr(fork));
         self.forks
-            .entry(fork.as_ptr() as usize)
+            .entry(Rc::as_ptr(fork) as usize)
             .or_default()
             .destroy = true;
     }
 
     /// Instruct the window manager about this fork's dimensions and split handle.
-    pub fn fork_update<'g>(&mut self, fork: &ForkPtr<'g>, t: &GhostToken<'g>) {
-        self.forks.entry(fork.as_ptr() as usize).or_default().update = Some({
-            let fork = fork.borrow(t);
+    pub fn fork_update(&mut self, fork: &ForkPtr<T>, t: &TCellOwner<T>) {
+        self.forks.entry(Rc::as_ptr(fork) as usize).or_default().update = Some({
+            let fork = fork.ro(t);
             ForkUpdate {
                 workspace: fork.workspace,
                 orientation: fork.orientation,
@@ -205,15 +218,15 @@ impl EventQueue {
     }
 
     /// Instruct the window manager that a window was assigned to a stack.
-    pub fn stack_assign<'g>(
+    pub fn stack_assign(
         &mut self,
-        stack: &StackPtr<'g>,
-        window: &WindowPtr<'g>,
-        t: &GhostToken<'g>,
+        stack: &StackPtr<T>,
+        window: &WindowPtr<T>,
+        t: &TCellOwner<T>,
     ) {
         *self
             .stacks
-            .entry(stack.as_ptr() as usize)
+            .entry(Rc::as_ptr(stack) as usize)
             .or_default()
             .assignments
             .entry(window.id(t))
@@ -221,15 +234,15 @@ impl EventQueue {
     }
 
     /// Instruct the window manager that a window was detached from a stack.
-    pub fn stack_detach<'g>(
+    pub fn stack_detach(
         &mut self,
-        stack: &StackPtr<'g>,
-        window: &WindowPtr<'g>,
-        t: &GhostToken<'g>,
+        stack: &StackPtr<T>,
+        window: &WindowPtr<T>,
+        t: &TCellOwner<T>,
     ) {
         *self
             .stacks
-            .entry(stack.as_ptr() as usize)
+            .entry(Rc::as_ptr(stack) as usize)
             .or_default()
             .assignments
             .entry(window.id(t))
@@ -237,36 +250,36 @@ impl EventQueue {
     }
 
     /// Instruct the window manager that this stack was destroyed.
-    pub fn stack_destroy<'g>(&mut self, stack: &StackPtr<'g>) {
+    pub fn stack_destroy(&mut self, stack: &StackPtr<T>) {
         self.stacks
-            .entry(stack.as_ptr() as usize)
+            .entry(Rc::as_ptr(stack) as usize)
             .or_default()
             .destroy = true;
     }
 
     /// Instruct the window manager to ensure that this window should be the visible one in the stack.
-    pub fn stack_raise_window<'g>(
+    pub fn stack_raise_window(
         &mut self,
-        stack: &StackPtr<'g>,
-        window: &WindowPtr<'g>,
-        t: &GhostToken<'g>,
+        stack: &StackPtr<T>,
+        window: &WindowPtr<T>,
+        t: &TCellOwner<T>,
     ) {
         self.stacks
-            .entry(stack.as_ptr() as usize)
+            .entry(Rc::as_ptr(stack) as usize)
             .or_default()
             .raise = Some(window.id(t))
     }
 
-    pub fn stack_movement<'g>(&mut self, stack: &StackPtr<'g>, movement: StackMovement) {
+    pub fn stack_movement(&mut self, stack: &StackPtr<T>, movement: StackMovement) {
         self.events
-            .push(Event::StackMovement(stack.as_ptr() as usize, movement));
+            .push(Event::StackMovement(Rc::as_ptr(stack) as usize, movement));
     }
 
     /// Instruct the window manager about a placement of a stack.
-    pub fn stack_update<'g>(&mut self, stack: &StackPtr<'g>, t: &GhostToken<'g>) {
-        let stack_ = stack.borrow(t);
+    pub fn stack_update(&mut self, stack: &StackPtr<T>, t: &TCellOwner<T>) {
+        let stack_ = stack.ro(t);
         self.stacks
-            .entry(stack.as_ptr() as usize)
+            .entry(Rc::as_ptr(stack) as usize)
             .or_default()
             .place = Some(Placement {
             area: stack_.area,

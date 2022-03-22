@@ -7,27 +7,33 @@ use crate::stack::StackPtr;
 use crate::tiler::Tiler;
 use crate::{Placement, Rect};
 use either::Either;
-use ghost_cell::{GhostCell, GhostToken};
+use qcell::{TCell, TCellOwner};
 use std::fmt::{self, Debug};
 use std::rc::Rc;
 
 /// An ID assigned to a window by a window manager.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[derive(Copy, Clone, From, Into, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(From, Into)]
 pub struct WindowID(pub u32, pub u32);
 
-/// Pointer to reference-counted window managed by a `GhostCell`.
-#[derive(Clone, Deref, DerefMut)]
-pub struct WindowPtr<'g>(pub(crate) Rc<GhostCell<'g, Window<'g>>>);
+/// Pointer to reference-counted window managed by a `TCell`.
+#[derive(Deref, DerefMut)]
+pub struct WindowPtr<T: 'static>(pub(crate) Rc<TCell<T, Window<T>>>);
+impl<T: 'static> Clone for WindowPtr<T> {
+    fn clone(&self) -> WindowPtr<T> {
+        WindowPtr(self.0.clone())
+    }
+}
 
-impl<'g> WindowPtr<'g> {
+impl<T: 'static> WindowPtr<T> {
     /// The ID assigned to the window by the window manager.
-    pub fn id(&self, t: &GhostToken<'g>) -> WindowID {
-        self.borrow(t).id
+    pub fn id(&self, t: &TCellOwner<T>) -> WindowID {
+        self.ro(t).id
     }
 
     /// Focus this window in the tree.
-    pub(crate) fn focus(&self, tiler: &mut Tiler<'g>, t: &mut GhostToken<'g>) {
+    pub(crate) fn focus(&self, tiler: &mut Tiler<T>, t: &mut TCellOwner<T>) {
         if let Some(focus) = tiler.active_window() {
             if Rc::ptr_eq(focus, self) {
                 return;
@@ -36,7 +42,7 @@ impl<'g> WindowPtr<'g> {
 
         if let Some(stack) = self.stack(t) {
             let mut visibility = Vec::new();
-            for this in stack.borrow(t).windows.iter() {
+            for this in stack.ro(t).windows.iter() {
                 visibility.push((this.id(t), Rc::ptr_eq(self, this)));
             }
 
@@ -49,38 +55,38 @@ impl<'g> WindowPtr<'g> {
     }
 
     /// Get a pointer to the parent fork assocation.
-    pub(crate) fn fork(&self, t: &GhostToken<'g>) -> Option<ForkPtr<'g>> {
-        self.borrow(t).fork.clone()
+    pub(crate) fn fork(&self, t: &TCellOwner<T>) -> Option<ForkPtr<T>> {
+        self.ro(t).fork.clone()
     }
 
     /// Remove the parent fork association and return it.
-    pub(crate) fn fork_take(&self, t: &mut GhostToken<'g>) -> Option<ForkPtr<'g>> {
-        self.borrow_mut(t).fork.take()
+    pub(crate) fn fork_take(&self, t: &mut TCellOwner<T>) -> Option<ForkPtr<T>> {
+        self.rw(t).fork.take()
     }
 
     /// Set the parent fork association for this window.
-    pub(crate) fn fork_set(&self, fork: ForkPtr<'g>, t: &mut GhostToken<'g>) {
-        self.borrow_mut(t).workspace = fork.borrow(t).workspace;
-        self.borrow_mut(t).fork = Some(fork);
+    pub(crate) fn fork_set(&self, fork: ForkPtr<T>, t: &mut TCellOwner<T>) {
+        self.rw(t).workspace = fork.ro(t).workspace;
+        self.rw(t).fork = Some(fork);
     }
 
     /// Get the pointer to the stack it may be associated with.
-    pub(crate) fn stack(&self, t: &GhostToken<'g>) -> Option<StackPtr<'g>> {
-        self.borrow(t).stack.clone()
+    pub(crate) fn stack(&self, t: &TCellOwner<T>) -> Option<StackPtr<T>> {
+        self.ro(t).stack.clone()
     }
 
     /// If a window is stacked, unstack it. If it is not stacked, stack it.
-    pub(crate) fn stack_toggle(&self, tiler: &mut Tiler<'g>, t: &mut GhostToken<'g>) {
+    pub(crate) fn stack_toggle(&self, tiler: &mut Tiler<T>, t: &mut TCellOwner<T>) {
         if let Some(stack) = self.stack(t) {
             stack.detach(tiler, self, t);
 
-            if stack.borrow(t).windows.is_empty() {
+            if stack.ro(t).windows.is_empty() {
                 let fork = ward::ward!(self.fork(t), else {
                     tracing::error!("window does not have a parent fork");
                     return;
                 });
 
-                let fork_ = fork.borrow_mut(t);
+                let fork_ = fork.rw(t);
 
                 let branch = ward::ward!(fork_.branch(BranchRef::Stack(&stack)), else {
                     tracing::error!("parent fork of window did not have a stack assocation for this window");
@@ -102,7 +108,7 @@ impl<'g> WindowPtr<'g> {
 
         let stack = StackPtr::new(self, fork.clone(), t);
 
-        let branch = ward::ward!(fork.borrow_mut(t).branch(BranchRef::Window(self)), else {
+        let branch = ward::ward!(fork.rw(t).branch(BranchRef::Window(self)), else {
             tracing::error!("cannot stack because window has invalid parent fork");
             stack.detach(tiler, self, t);
             return;
@@ -118,9 +124,9 @@ impl<'g> WindowPtr<'g> {
     /// Swaps the tree location of this window with another.
     pub(crate) fn swap_position_with(
         &self,
-        tiler: &mut Tiler<'g>,
-        other: &WindowPtr<'g>,
-        t: &mut GhostToken<'g>,
+        tiler: &mut Tiler<T>,
+        other: &WindowPtr<T>,
+        t: &mut TCellOwner<T>,
     ) {
         if let Some(stack) = self.stack(t) {
             stack.swap(self, other, t);
@@ -142,11 +148,11 @@ impl<'g> WindowPtr<'g> {
     /// Update the position and dimensions of this window.
     pub(crate) fn work_area_update(
         &self,
-        tiler: &mut Tiler<'g>,
+        tiler: &mut Tiler<T>,
         area: Rect,
-        t: &mut GhostToken<'g>,
+        t: &mut TCellOwner<T>,
     ) {
-        let this = self.borrow_mut(t);
+        let this = self.rw(t);
         if this.rect != area {
             this.rect = area;
         }
@@ -158,19 +164,19 @@ impl<'g> WindowPtr<'g> {
     }
 }
 
-pub struct Window<'g> {
-    pub(crate) fork: Option<ForkPtr<'g>>,
+pub struct Window<T: 'static> {
+    pub(crate) fork: Option<ForkPtr<T>>,
     pub(crate) id: WindowID,
     pub(crate) rect: Rect,
-    pub(crate) stack: Option<StackPtr<'g>>,
+    pub(crate) stack: Option<StackPtr<T>>,
     pub(crate) workspace: u32,
     pub(crate) visible: bool,
 }
 
-impl<'g> Window<'g> {
+impl<T: 'static> Window<T> {
     pub(crate) fn new<I: Into<WindowID>>(id: I) -> Self {
         Self {
-            fork: None::<ForkPtr<'g>>,
+            fork: None::<ForkPtr<T>>,
             id: id.into(),
             rect: Rect::new(1, 1, 1, 1),
             stack: None,
@@ -179,34 +185,34 @@ impl<'g> Window<'g> {
         }
     }
 
-    pub fn debug<'a>(&'a self, t: &'a GhostToken<'g>) -> WindowDebug<'a, 'g> {
+    pub fn debug<'a>(&'a self, t: &'a TCellOwner<T>) -> WindowDebug<'a, T> {
         WindowDebug::new(self, t)
     }
 }
 
-impl<'g> Drop for Window<'g> {
+impl<T: 'static> Drop for Window<T> {
     fn drop(&mut self) {
         tracing::debug!("dropped {:?}", self.id);
     }
 }
 
-pub struct WindowDebug<'a, 'g> {
-    window: &'a Window<'g>,
-    _t: &'a GhostToken<'g>,
+pub struct WindowDebug<'a, T: 'static> {
+    window: &'a Window<T>,
+    _t: &'a TCellOwner<T>,
 }
 
-impl<'a, 'g> WindowDebug<'a, 'g> {
-    fn new(window: &'a Window<'g>, t: &'a GhostToken<'g>) -> Self {
+impl<'a, T> WindowDebug<'a, T> {
+    fn new(window: &'a Window<T>, t: &'a TCellOwner<T>) -> Self {
         Self { window, _t: t }
     }
 }
 
-impl<'a, 'g> Debug for WindowDebug<'a, 'g> {
+impl<'a, T> Debug for WindowDebug<'a, T> {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         fmt.debug_struct("Window")
             .field("id", &self.window.id)
-            .field("fork", &self.window.fork.as_ref().map(|p| p.as_ptr()))
-            .field("stack", &self.window.stack.as_ref().map(|p| p.as_ptr()))
+            .field("fork", &self.window.fork.as_ref().map(|p| Rc::as_ptr(p)))
+            .field("stack", &self.window.stack.as_ref().map(|p| Rc::as_ptr(p)))
             .field("workspace", &self.window.workspace)
             .field("rect", &self.window.rect)
             .finish()

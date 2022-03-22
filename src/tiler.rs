@@ -10,7 +10,7 @@ use crate::window::{Window, WindowID, WindowPtr};
 use crate::workspace::WorkspacePtr;
 use crate::{Event, Rect};
 use either::Either;
-use ghost_cell::{GhostCell, GhostToken};
+use qcell::{TCell, TCellOwner};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Debug};
 use std::rc::Rc;
@@ -26,20 +26,20 @@ pub enum Direction {
 }
 
 /// A tiling window manager
-pub struct Tiler<'g> {
-    pub(crate) event_queue: EventQueue,
+pub struct Tiler<T: 'static> {
+    pub(crate) event_queue: EventQueue<T>,
     active_changed: bool,
-    active: Option<WindowPtr<'g>>,
+    active: Option<WindowPtr<T>>,
     active_workspace: u32,
     active_workspace_changed: bool,
 
-    pub windows: BTreeMap<WindowID, WindowPtr<'g>>,
-    forks: BTreeMap<usize, ForkPtr<'g>>,
-    displays: BTreeMap<u32, DisplayPtr<'g>>,
-    workspaces: BTreeMap<u32, WorkspacePtr<'g>>,
+    pub windows: BTreeMap<WindowID, WindowPtr<T>>,
+    forks: BTreeMap<usize, ForkPtr<T>>,
+    displays: BTreeMap<u32, DisplayPtr<T>>,
+    workspaces: BTreeMap<u32, WorkspacePtr<T>>,
 }
 
-impl<'g> Default for Tiler<'g> {
+impl<T: 'static> Default for Tiler<T> {
     fn default() -> Self {
         Self {
             event_queue: EventQueue::default(),
@@ -55,13 +55,13 @@ impl<'g> Default for Tiler<'g> {
     }
 }
 
-impl<'g> Tiler<'g> {
-    pub fn active_window(&self) -> Option<&WindowPtr<'g>> {
+impl<T: 'static> Tiler<T> {
+    pub fn active_window(&self) -> Option<&WindowPtr<T>> {
         self.active.as_ref()
     }
 
     /// Attach a window to the focused window in the tiler, and associate it with the tiler.
-    pub fn attach(&mut self, window: &WindowPtr<'g>, t: &mut GhostToken<'g>) {
+    pub fn attach(&mut self, window: &WindowPtr<T>, t: &mut TCellOwner<T>) {
         // Attach the window to the tiler in case it was not.
         self.windows.insert(window.id(t), window.clone());
 
@@ -87,15 +87,15 @@ impl<'g> Tiler<'g> {
     /// Attach a window to an existing window
     fn attach_to_window(
         &mut self,
-        new_window: &WindowPtr<'g>,
-        attach_to: &WindowPtr<'g>,
-        t: &mut GhostToken<'g>,
+        new_window: &WindowPtr<T>,
+        attach_to: &WindowPtr<T>,
+        t: &mut TCellOwner<T>,
     ) {
         // If window is attached to stack, then attach new window to the same stack
         if let Some((stack, fork)) = attach_to.stack(t).zip(attach_to.fork(t)) {
             new_window.fork_set(fork.clone(), t);
             stack.attach(new_window, t);
-            stack.work_area_update(self, stack.borrow(t).area, t);
+            stack.work_area_update(self, stack.ro(t).area, t);
             return;
         }
 
@@ -111,16 +111,16 @@ impl<'g> Tiler<'g> {
     /// Attach the `window` to the `attaching` window in the `fork`.
     fn attach_to_window_in_fork(
         &mut self,
-        window: &WindowPtr<'g>,
-        attaching: &WindowPtr<'g>,
-        fork: &ForkPtr<'g>,
-        t: &mut GhostToken<'g>,
+        window: &WindowPtr<T>,
+        attaching: &WindowPtr<T>,
+        fork: &ForkPtr<T>,
+        t: &mut TCellOwner<T>,
     ) {
         let workspace: u32;
 
         // If the right branch is empty, assign our new window to it.
         {
-            let fork_ = fork.borrow_mut(t);
+            let fork_ = fork.rw(t);
 
             workspace = fork_.workspace;
 
@@ -149,7 +149,7 @@ impl<'g> Tiler<'g> {
 
         // Then assign the new branch to the fork where the window was.
         {
-            let fork_ = fork.borrow_mut(t);
+            let fork_ = fork.rw(t);
             match fork_.branch(BranchRef::Window(attaching)) {
                 Some(Either::Left(branch)) | Some(Either::Right(branch)) => *branch = new_branch,
                 None => tracing::error!("invalid parent fork association in window"),
@@ -167,9 +167,9 @@ impl<'g> Tiler<'g> {
     /// Attach a window a tree on a display.
     fn attach_to_workspace(
         &mut self,
-        window: &WindowPtr<'g>,
-        workspace: &WorkspacePtr<'g>,
-        t: &mut GhostToken<'g>,
+        window: &WindowPtr<T>,
+        workspace: &WorkspacePtr<T>,
+        t: &mut TCellOwner<T>,
     ) {
         let area = workspace.area(t);
 
@@ -189,7 +189,7 @@ impl<'g> Tiler<'g> {
 
         window.fork_set(fork.clone(), t);
 
-        let workspace = workspace.borrow_mut(t);
+        let workspace = workspace.rw(t);
         workspace.focus = Some(window.clone());
         workspace.fork = Some(fork.clone());
 
@@ -197,7 +197,7 @@ impl<'g> Tiler<'g> {
     }
 
     /// Detach a window from its tree, and removes its association with this tiler.
-    pub fn detach(&mut self, window: &WindowPtr<'g>, t: &mut GhostToken<'g>) {
+    pub fn detach(&mut self, window: &WindowPtr<T>, t: &mut TCellOwner<T>) {
         // Remove the window from management of the tiler.
         self.windows.remove(&window.id(t));
 
@@ -221,16 +221,16 @@ impl<'g> Tiler<'g> {
     }
 
     /// Detach a window from a fork.
-    fn detach_fork(&mut self, fork: ForkPtr<'g>, t: &mut GhostToken<'g>) {
+    fn detach_fork(&mut self, fork: ForkPtr<T>, t: &mut TCellOwner<T>) {
         eprintln!("requested to detach fork");
         let mut detaching = Some(fork);
 
         while let Some(fork) = detaching.take() {
             self.event_queue.fork_destroy(&fork);
-            self.forks.remove(&(fork.as_ptr() as usize));
+            self.forks.remove(&(Rc::as_ptr(&fork) as usize));
 
-            if let Some(parent) = fork.borrow_mut(t).parent.take() {
-                let parent_ = parent.borrow_mut(t);
+            if let Some(parent) = fork.rw(t).parent.take() {
+                let parent_ = parent.rw(t);
                 if parent_.left_is(BranchRef::Fork(&fork)) {
                     if let Some(right) = parent_.right.take() {
                         parent_.left = right;
@@ -242,7 +242,7 @@ impl<'g> Tiler<'g> {
                 for workspace in self.workspaces.values() {
                     if let Some(ref root) = workspace.fork(t) {
                         if Rc::ptr_eq(root, &fork) {
-                            workspace.borrow_mut(t).fork = None;
+                            workspace.rw(t).fork = None;
                             return;
                         }
                     }
@@ -254,28 +254,28 @@ impl<'g> Tiler<'g> {
     /// Detach a window or stack from a fork
     pub(crate) fn detach_branch(
         &mut self,
-        fork: ForkPtr<'g>,
-        reference: BranchRef<'_, 'g>,
-        t: &mut GhostToken<'g>,
+        fork: ForkPtr<T>,
+        reference: BranchRef<'_, T>,
+        t: &mut TCellOwner<T>,
     ) {
-        tracing::debug!("detaching branch from Fork({})", fork.as_ptr() as usize);
+        tracing::debug!("detaching branch from Fork({})", Rc::as_ptr(&fork) as usize);
 
         // After removing a window, it's possible to have a fork in a fork with an empty
         // branch on one side. When this happens, we will discard the parent fork and
         // place the grandchild in its place. Then the child association of the
         // grandparent fork is updated to point to the grandchild who is now a direct
         // child.
-        fn reparent<'g>(
-            tiler: &mut Tiler<'g>,
-            grandparent: Option<ForkPtr<'g>>,
-            parent: ForkPtr<'g>,
-            grandchild: ForkPtr<'g>,
-            t: &mut GhostToken<'g>,
+        fn reparent<T>(
+            tiler: &mut Tiler<T>,
+            grandparent: Option<ForkPtr<T>>,
+            parent: ForkPtr<T>,
+            grandchild: ForkPtr<T>,
+            t: &mut TCellOwner<T>,
         ) {
             match grandparent {
                 Some(grandparent) => {
                     // Update child association of the grandparent fork
-                    let grandparent_ = grandparent.borrow_mut(t);
+                    let grandparent_ = grandparent.rw(t);
                     match grandparent_.branch(BranchRef::Fork(&parent)) {
                         Some(Either::Left(branch)) | Some(Either::Right(branch)) => {
                             *branch = Branch::Fork(grandchild.clone())
@@ -286,21 +286,21 @@ impl<'g> Tiler<'g> {
                     grandparent.work_area_refresh(tiler, t);
 
                     // Update the parent association of the grandchild now a child
-                    grandchild.borrow_mut(t).parent = Some(grandparent);
+                    grandchild.rw(t).parent = Some(grandparent);
                 }
                 None => {
                     let mut display = None;
 
                     for info in tiler.workspaces.values() {
-                        if let Some(ref workspace_fork) = info.borrow(t).fork {
+                        if let Some(ref workspace_fork) = info.ro(t).fork {
                             if !Rc::ptr_eq(workspace_fork, &parent) {
                                 continue;
                             }
 
-                            display = Some(info.borrow(t).parent.borrow(t).area);
+                            display = Some(info.ro(t).parent.ro(t).area);
 
-                            grandchild.borrow_mut(t).parent = None;
-                            info.borrow_mut(t).fork = Some(grandchild.clone());
+                            grandchild.rw(t).parent = None;
+                            info.rw(t).fork = Some(grandchild.clone());
                             break;
                         }
                     }
@@ -312,11 +312,11 @@ impl<'g> Tiler<'g> {
             }
 
             // Remove the orphaned fork
-            parent.borrow_mut(t).parent.take();
+            parent.rw(t).parent.take();
             tiler.detach_fork(parent, t);
         }
 
-        let fork_ = fork.borrow_mut(t);
+        let fork_ = fork.rw(t);
 
         if fork_.left_is(reference) {
             tracing::debug!("detaching left branch of fork");
@@ -356,13 +356,13 @@ impl<'g> Tiler<'g> {
     }
 
     /// Removes a display from the tree, and migrates its workspaces to another display
-    pub fn display_detach(&mut self, display_id: u32, t: &mut GhostToken<'g>) {
+    pub fn display_detach(&mut self, display_id: u32, t: &mut TCellOwner<T>) {
         // Get the active display to assign to.
         let active = self
             .workspaces
             .get(&self.active_workspace)
             .expect("active workspace doesn't exist")
-            .borrow(t)
+            .ro(t)
             .parent
             .clone();
 
@@ -374,7 +374,7 @@ impl<'g> Tiler<'g> {
 
         // Take ownership of its workspaces.
         let mut workspaces = HashMap::new();
-        std::mem::swap(&mut workspaces, &mut display_ptr.borrow_mut(t).workspaces);
+        std::mem::swap(&mut workspaces, &mut display_ptr.rw(t).workspaces);
 
         // Migrate workspaces.
         for workspace in workspaces.into_values() {
@@ -383,7 +383,7 @@ impl<'g> Tiler<'g> {
     }
 
     /// Creates or updates a display associated with the tree.
-    pub fn display_update(&mut self, display: u32, area: Rect, t: &mut GhostToken<'g>) {
+    pub fn display_update(&mut self, display: u32, area: Rect, t: &mut TCellOwner<T>) {
         let display = self
             .displays
             .entry(display)
@@ -394,7 +394,7 @@ impl<'g> Tiler<'g> {
     }
 
     /// Retrieves the latest set of instructions for the window manager to carry out.
-    pub fn events<'a>(&'a mut self, t: &'a mut GhostToken<'g>) -> impl Iterator<Item = Event> + 'a {
+    pub fn events<'a>(&'a mut self, t: &'a mut TCellOwner<T>) -> impl Iterator<Item = Event> + 'a {
         let focus: Option<Event> = if self.active_changed {
             self.active_window().map(|a| Event::Focus(a.id(t)))
         } else {
@@ -416,12 +416,12 @@ impl<'g> Tiler<'g> {
     }
 
     /// Focus this window in the tree.
-    pub fn focus(&mut self, window: &WindowPtr<'g>, t: &mut GhostToken<'g>) {
+    pub fn focus(&mut self, window: &WindowPtr<T>, t: &mut TCellOwner<T>) {
         window.focus(self, t);
     }
 
     /// Move focus to the window above the active one.
-    pub fn focus_above(&mut self, t: &mut GhostToken<'g>) {
+    pub fn focus_above(&mut self, t: &mut TCellOwner<T>) {
         match self.window_in_direction(Rect::distance_upward, Rect::is_below, t) {
             Some(active) => self.set_active_window(&active, t),
             None => self.focus_display_above(t),
@@ -429,7 +429,7 @@ impl<'g> Tiler<'g> {
     }
 
     /// Move focus to the window below the active one.
-    pub fn focus_below(&mut self, t: &mut GhostToken<'g>) {
+    pub fn focus_below(&mut self, t: &mut TCellOwner<T>) {
         match self.window_in_direction(Rect::distance_downward, Rect::is_above, t) {
             Some(active) => self.set_active_window(&active, t),
             None => self.focus_display_below(t),
@@ -437,12 +437,12 @@ impl<'g> Tiler<'g> {
     }
 
     /// Move focus to the window left of the active one.
-    pub fn focus_left(&mut self, t: &mut GhostToken<'g>) {
+    pub fn focus_left(&mut self, t: &mut TCellOwner<T>) {
         self.focus_with_stack(StackPtr::select_left, Self::focus_left_absolute, t);
     }
 
     /// Move focus to the left window, even if in a stack.
-    pub fn focus_left_absolute(&mut self, t: &mut GhostToken<'g>) {
+    pub fn focus_left_absolute(&mut self, t: &mut TCellOwner<T>) {
         match self.window_in_direction(Rect::distance_westward, Rect::is_right, t) {
             Some(active) => self.set_active_window(&active, t),
             None => self.focus_display_left(t),
@@ -450,12 +450,12 @@ impl<'g> Tiler<'g> {
     }
 
     /// Move focus to the window right of the active one.
-    pub fn focus_right(&mut self, t: &mut GhostToken<'g>) {
+    pub fn focus_right(&mut self, t: &mut TCellOwner<T>) {
         self.focus_with_stack(StackPtr::select_right, Self::focus_right_absolute, t);
     }
 
     /// Move focus to the right window, even if in a stack.
-    pub fn focus_right_absolute(&mut self, t: &mut GhostToken<'g>) {
+    pub fn focus_right_absolute(&mut self, t: &mut TCellOwner<T>) {
         match self.window_in_direction(Rect::distance_eastward, Rect::is_left, t) {
             Some(active) => self.set_active_window(&active, t),
             None => self.focus_display_right(t),
@@ -463,12 +463,12 @@ impl<'g> Tiler<'g> {
     }
 
     /// Focus the active window on this display.
-    fn focus_display(&mut self, display: DisplayPtr<'g>, t: &mut GhostToken<'g>) {
-        let display = display.borrow(t);
+    fn focus_display(&mut self, display: DisplayPtr<T>, t: &mut TCellOwner<T>) {
+        let display = display.ro(t);
 
         if let Some(active) = display.active {
             if let Some(workspace) = display.workspaces.get(&active) {
-                if let Some(active) = workspace.borrow(t).focus.clone() {
+                if let Some(active) = workspace.ro(t).focus.clone() {
                     self.set_active_window(&active, t);
                 }
             }
@@ -476,7 +476,7 @@ impl<'g> Tiler<'g> {
     }
 
     /// Move focus to the workspace on the display to the left of the active one.
-    pub fn focus_display_left(&mut self, t: &mut GhostToken<'g>) {
+    pub fn focus_display_left(&mut self, t: &mut TCellOwner<T>) {
         if let Some(display) = self.display_in_direction(Rect::distance_westward, Rect::is_right, t)
         {
             self.focus_display(display, t);
@@ -484,7 +484,7 @@ impl<'g> Tiler<'g> {
     }
 
     /// Move focus to the workspace on the display to the right of the active one.
-    pub fn focus_display_right(&mut self, t: &mut GhostToken<'g>) {
+    pub fn focus_display_right(&mut self, t: &mut TCellOwner<T>) {
         if let Some(display) = self.display_in_direction(Rect::distance_eastward, Rect::is_left, t)
         {
             self.focus_display(display, t);
@@ -492,14 +492,14 @@ impl<'g> Tiler<'g> {
     }
 
     /// Move focus to the workspace on the display above the active one.
-    pub fn focus_display_above(&mut self, t: &mut GhostToken<'g>) {
+    pub fn focus_display_above(&mut self, t: &mut TCellOwner<T>) {
         if let Some(display) = self.display_in_direction(Rect::distance_upward, Rect::is_below, t) {
             self.focus_display(display, t);
         }
     }
 
     /// Move focus to the workspace on the display below the active one.
-    pub fn focus_display_below(&mut self, t: &mut GhostToken<'g>) {
+    pub fn focus_display_below(&mut self, t: &mut TCellOwner<T>) {
         if let Some(display) = self.display_in_direction(Rect::distance_downward, Rect::is_above, t)
         {
             self.focus_display(display, t);
@@ -509,16 +509,16 @@ impl<'g> Tiler<'g> {
     /// Manage focus movements with consideration for in-stack movements.
     fn focus_with_stack(
         &mut self,
-        stack_func: fn(&StackPtr<'g>, &mut GhostToken<'g>) -> Option<WindowPtr<'g>>,
-        focus_func: fn(&mut Self, &mut GhostToken<'g>),
-        t: &mut GhostToken<'g>,
+        stack_func: fn(&StackPtr<T>, &mut TCellOwner<T>) -> Option<WindowPtr<T>>,
+        focus_func: fn(&mut Self, &mut TCellOwner<T>),
+        t: &mut TCellOwner<T>,
     ) {
         let active = ward::ward!(self.active_window(), else { return });
 
         // If window is in a stack, select the window to the left of the stack.
         if let Some(stack) = active.stack(t) {
             if let Some(left) = stack_func(&stack, t) {
-                stack.borrow_mut(t).active = left.clone();
+                stack.rw(t).active = left.clone();
                 self.set_active_window(&left, t);
                 return;
             }
@@ -528,13 +528,13 @@ impl<'g> Tiler<'g> {
     }
 
     /// Keep track of this fork directly in the tiler.
-    fn fork_register(&mut self, fork: ForkPtr<'g>, t: &GhostToken<'g>) {
+    fn fork_register(&mut self, fork: ForkPtr<T>, t: &TCellOwner<T>) {
         self.event_queue.fork_update(&fork, t);
-        self.forks.insert(fork.as_ptr() as usize, fork);
+        self.forks.insert(Rc::as_ptr(&fork) as usize, fork);
     }
 
     /// Resize a fork with a new split
-    pub fn fork_resize(&mut self, fork: usize, split: u32, t: &mut GhostToken<'g>) {
+    pub fn fork_resize(&mut self, fork: usize, split: u32, t: &mut TCellOwner<T>) {
         if let Some(fork) = self.forks.get(&fork).cloned() {
             fork.resize(self, split, t);
         }
@@ -543,11 +543,11 @@ impl<'g> Tiler<'g> {
     /// When moving vertically or horizontally, move active window out of the stack.
     fn move_from_stack(
         &mut self,
-        active: &WindowPtr<'g>,
-        fork: &ForkPtr<'g>,
-        stack: &StackPtr<'g>,
+        active: &WindowPtr<T>,
+        fork: &ForkPtr<T>,
+        stack: &StackPtr<T>,
         direction: Direction,
-        t: &mut GhostToken<'g>,
+        t: &mut TCellOwner<T>,
     ) {
         let (orientation, stack_on_left) = match direction {
             Direction::Above => (Orientation::Vertical, false),
@@ -556,11 +556,11 @@ impl<'g> Tiler<'g> {
             Direction::Right => (Orientation::Horizontal, true),
         };
 
-        let area = stack.borrow(t).area;
-        let workspace = fork.borrow(t).workspace;
-        let windows = stack.borrow(t).windows.len();
+        let area = stack.ro(t).area;
+        let workspace = fork.ro(t).workspace;
+        let windows = stack.ro(t).windows.len();
 
-        let branch = ward::ward!(fork.borrow_mut(t).branch(BranchRef::Stack(stack)), else {
+        let branch = ward::ward!(fork.rw(t).branch(BranchRef::Stack(stack)), else {
             tracing::error!("invalid parent fork association of stacked window");
             return;
         });
@@ -588,7 +588,7 @@ impl<'g> Tiler<'g> {
 
                     *prev_branch = Branch::Fork(new_fork.clone());
 
-                    new_fork.borrow_mut(t).parent = Some(fork.clone());
+                    new_fork.rw(t).parent = Some(fork.clone());
                     self.fork_register(new_fork.clone(), t);
                     new_fork.orientation_set(self, orientation, t);
                 }
@@ -601,9 +601,9 @@ impl<'g> Tiler<'g> {
     /// When moving horizontally, check if a window is stacked and can be moved within the stack.
     fn move_horizontally(
         &mut self,
-        stack_func: fn(&StackPtr<'g>, &mut GhostToken<'g>) -> Option<StackMovement>,
-        else_func: fn(&mut Self, &mut GhostToken<'g>),
-        t: &mut GhostToken<'g>,
+        stack_func: fn(&StackPtr<T>, &mut TCellOwner<T>) -> Option<StackMovement>,
+        else_func: fn(&mut Self, &mut TCellOwner<T>),
+        t: &mut TCellOwner<T>,
     ) {
         let active = ward::ward!(self.active_window(), else { return });
 
@@ -619,11 +619,11 @@ impl<'g> Tiler<'g> {
     }
 
     /// Move the active window up in the tree.
-    pub fn move_left(&mut self, t: &mut GhostToken<'g>) {
+    pub fn move_left(&mut self, t: &mut TCellOwner<T>) {
         self.move_horizontally(StackPtr::move_left, Self::move_left_absolute, t);
     }
 
-    fn move_in_direction(&mut self, direction: Direction, t: &mut GhostToken<'g>) {
+    fn move_in_direction(&mut self, direction: Direction, t: &mut TCellOwner<T>) {
         let active = ward::ward!(self.active_window().cloned(), else { return });
         let fork = ward::ward!(active.fork(t), else { return });
 
@@ -649,7 +649,7 @@ impl<'g> Tiler<'g> {
 
             // If the window being attached is in the same fork, swap positions.
             if Rc::ptr_eq(&fork, &matched_fork) {
-                let fork_ = fork.borrow_mut(t);
+                let fork_ = fork.rw(t);
                 if let Some(right) = fork_.right.as_mut() {
                     std::mem::swap(right, &mut fork_.left);
                     fork.work_area_refresh(self, t);
@@ -667,32 +667,32 @@ impl<'g> Tiler<'g> {
     }
 
     /// Move the active window to the left, even if it is stacked.
-    pub fn move_left_absolute(&mut self, t: &mut GhostToken<'g>) {
+    pub fn move_left_absolute(&mut self, t: &mut TCellOwner<T>) {
         self.move_in_direction(Direction::Left, t);
     }
 
     /// Move the active window to the right in the tree.
-    pub fn move_right(&mut self, t: &mut GhostToken<'g>) {
+    pub fn move_right(&mut self, t: &mut TCellOwner<T>) {
         self.move_horizontally(StackPtr::move_right, Self::move_right_absolute, t);
     }
 
     /// Move the active window to the right, even if it is stacked.
-    pub fn move_right_absolute(&mut self, t: &mut GhostToken<'g>) {
+    pub fn move_right_absolute(&mut self, t: &mut TCellOwner<T>) {
         self.move_in_direction(Direction::Right, t);
     }
 
     /// Move the active window above in the tree.
-    pub fn move_above(&mut self, t: &mut GhostToken<'g>) {
+    pub fn move_above(&mut self, t: &mut TCellOwner<T>) {
         self.move_in_direction(Direction::Above, t)
     }
 
     /// Move the active window below in the tree.
-    pub fn move_below(&mut self, t: &mut GhostToken<'g>) {
+    pub fn move_below(&mut self, t: &mut TCellOwner<T>) {
         self.move_in_direction(Direction::Below, t);
     }
 
     /// Toggle the orientation of the active window.
-    pub fn toggle_orientation(&mut self, t: &mut GhostToken<'g>) {
+    pub fn toggle_orientation(&mut self, t: &mut TCellOwner<T>) {
         if let Some(active) = self.active_window() {
             if let Some(fork) = active.fork(t) {
                 fork.toggle_orientation(self, t);
@@ -701,11 +701,11 @@ impl<'g> Tiler<'g> {
     }
 
     /// Set a new active window, and mark that we should notify the window manager.
-    pub(crate) fn set_active_window(&mut self, window: &WindowPtr<'g>, t: &mut GhostToken<'g>) {
+    pub(crate) fn set_active_window(&mut self, window: &WindowPtr<T>, t: &mut TCellOwner<T>) {
         self.active = Some(window.clone());
         self.active_changed = true;
 
-        let workspace = window.borrow(t).workspace;
+        let workspace = window.ro(t).workspace;
 
         if self.active_workspace != workspace {
             self.workspace_switch(workspace, t);
@@ -713,26 +713,26 @@ impl<'g> Tiler<'g> {
     }
 
     /// If a window is stacked, unstack it. If it is not stacked, stack it.
-    pub fn stack_toggle(&mut self, t: &mut GhostToken<'g>) {
+    pub fn stack_toggle(&mut self, t: &mut TCellOwner<T>) {
         if let Some(active) = self.active_window().cloned() {
             active.stack_toggle(self, t);
         }
     }
 
     /// Swaps the tree location of this window with another.
-    pub fn swap(&mut self, from: &WindowPtr<'g>, with: &WindowPtr<'g>, t: &mut GhostToken<'g>) {
+    pub fn swap(&mut self, from: &WindowPtr<T>, with: &WindowPtr<T>, t: &mut TCellOwner<T>) {
         from.swap_position_with(self, with, t);
     }
 
     /// Create a new pointer to a window managed by this tiler.
-    pub fn window<I: Into<WindowID>>(&mut self, id: I) -> WindowPtr<'g> {
+    pub fn window<I: Into<WindowID>>(&mut self, id: I) -> WindowPtr<T> {
         let id = id.into();
 
         if let Some(window) = self.windows.get(&id) {
             return window.clone();
         }
 
-        let window = WindowPtr(Rc::new(GhostCell::new(Window::new(id))));
+        let window = WindowPtr(Rc::new(TCell::new(Window::new(id))));
 
         self.windows.insert(id, window.clone());
 
@@ -744,12 +744,12 @@ impl<'g> Tiler<'g> {
         &self,
         distance: DistanceFn,
         filter: DirectionalConditionFn,
-        t: &mut GhostToken<'g>,
-    ) -> Option<DisplayPtr<'g>> {
+        t: &mut TCellOwner<T>,
+    ) -> Option<DisplayPtr<T>> {
         let active = ward::ward!(self.workspaces.get(&self.active_workspace), else { return None });
 
-        let active = &active.borrow(t).parent;
-        let active_rect = &active.borrow(t).area;
+        let active = &active.ro(t).parent;
+        let active_rect = &active.ro(t).area;
 
         let mut least_distance = f64::MAX;
         let mut candidate = None;
@@ -759,7 +759,7 @@ impl<'g> Tiler<'g> {
                 continue;
             }
 
-            let this_rect = &display.borrow(t).area;
+            let this_rect = &display.ro(t).area;
 
             if filter(active_rect, this_rect) {
                 continue;
@@ -782,11 +782,11 @@ impl<'g> Tiler<'g> {
         &self,
         distance: DistanceFn,
         filter: DirectionalConditionFn,
-        t: &GhostToken<'g>,
-    ) -> Option<WindowPtr<'g>> {
+        t: &TCellOwner<T>,
+    ) -> Option<WindowPtr<T>> {
         let active = ward::ward!(self.active_window(), else { return None });
 
-        let active_ = active.borrow(t);
+        let active_ = active.ro(t);
         let stack = active_.stack.as_ref();
         let rect = active_.rect;
         let workspace = active_.workspace;
@@ -796,7 +796,7 @@ impl<'g> Tiler<'g> {
 
         for window in self.windows.values() {
             // Ignores windows from a different workspace.
-            if window.borrow(t).workspace != workspace {
+            if window.ro(t).workspace != workspace {
                 continue;
             }
 
@@ -806,13 +806,13 @@ impl<'g> Tiler<'g> {
             }
 
             // Ignores windows in the same stack.
-            if let Some((active, this)) = stack.zip(window.borrow(t).stack.as_ref()) {
+            if let Some((active, this)) = stack.zip(window.ro(t).stack.as_ref()) {
                 if Rc::ptr_eq(active, this) {
                     continue;
                 }
             }
 
-            let this_rect = &window.borrow(t).rect;
+            let this_rect = &window.ro(t).rect;
 
             // Avoid considering windows that meet this criteria.
             if filter(&rect, this_rect) {
@@ -831,14 +831,14 @@ impl<'g> Tiler<'g> {
     }
 
     /// Detaches a workspace from the tree.
-    fn workspace_detach(&mut self, workspace: u32, t: &mut GhostToken<'g>) {
+    fn workspace_detach(&mut self, workspace: u32, t: &mut TCellOwner<T>) {
         let workspace = ward::ward!(self.workspaces.remove(&workspace), else {
             tracing::error!("detached a workspace that didn't exist");
             return;
         });
 
         workspace
-            .borrow_mut(t)
+            .rw(t)
             .parent
             .clone()
             .remove_association(workspace, t);
@@ -847,7 +847,7 @@ impl<'g> Tiler<'g> {
     /// Switching the workspace will hide all windows on other workspaces, show all
     /// visible windows for the given workspace, and focus the active window on the
     /// given workspace.
-    pub fn workspace_switch(&mut self, workspace: u32, t: &mut GhostToken<'g>) {
+    pub fn workspace_switch(&mut self, workspace: u32, t: &mut TCellOwner<T>) {
         if self.active_workspace == workspace {
             return;
         }
@@ -860,7 +860,7 @@ impl<'g> Tiler<'g> {
         std::mem::swap(&mut self.event_queue.windows, &mut window_events);
 
         for (id, window) in self.windows.iter() {
-            let this = window.borrow_mut(t);
+            let this = window.rw(t);
 
             let is_visible = this.visible;
 
@@ -876,13 +876,13 @@ impl<'g> Tiler<'g> {
 
             // If window on switched workspace is the active window in a stack
             if let Some(stack) = this.stack.clone() {
-                if Rc::ptr_eq(&stack.borrow(t).active, window) {
+                if Rc::ptr_eq(&stack.ro(t).active, window) {
                     if !is_visible {
-                        window.borrow_mut(t).visible = true;
+                        window.rw(t).visible = true;
                         window_events.entry(*id).or_default().visibility = Some(true);
                     }
                 } else if is_visible {
-                    window.borrow_mut(t).visible = false;
+                    window.rw(t).visible = false;
                     window_events.entry(*id).or_default().visibility = Some(false);
                 }
 
@@ -891,7 +891,7 @@ impl<'g> Tiler<'g> {
 
             // All other windows not in a stack
             if !is_visible {
-                window.borrow_mut(t).visible = true;
+                window.rw(t).visible = true;
                 window_events.entry(*id).or_default().visibility = Some(true);
             }
         }
@@ -902,7 +902,7 @@ impl<'g> Tiler<'g> {
             .workspaces
             .get_mut(&workspace)
             .expect("no workspace assigned")
-            .borrow_mut(t);
+            .rw(t);
 
         if let Some(active) = workspace.focus.clone() {
             self.set_active_window(&active, t);
@@ -910,7 +910,7 @@ impl<'g> Tiler<'g> {
     }
 
     /// Associate a workspace with a display, and creates the workspace if it didn't exist.
-    pub fn workspace_update(&mut self, workspace: u32, display: u32, t: &mut GhostToken<'g>) {
+    pub fn workspace_update(&mut self, workspace: u32, display: u32, t: &mut TCellOwner<T>) {
         let display_ = ward::ward!(self.displays.get(&display).cloned(), else {
             tracing::error!("cannot attach workspace to non-existent display");
             return;
@@ -927,23 +927,23 @@ impl<'g> Tiler<'g> {
         }
     }
 
-    pub fn debug<'a>(&'a self, t: &'a GhostToken<'g>) -> TilerDisplay<'a, 'g> {
+    pub fn debug<'a>(&'a self, t: &'a TCellOwner<T>) -> TilerDisplay<'a, T> {
         TilerDisplay::new(self, t)
     }
 }
 
-pub struct TilerDisplay<'a, 'g> {
-    pub tiler: &'a Tiler<'g>,
-    pub t: &'a GhostToken<'g>,
+pub struct TilerDisplay<'a, T: 'static> {
+    pub tiler: &'a Tiler<T>,
+    pub t: &'a TCellOwner<T>,
 }
 
-impl<'a, 'g> TilerDisplay<'a, 'g> {
-    fn new(tiler: &'a Tiler<'g>, t: &'a GhostToken<'g>) -> Self {
+impl<'a, T> TilerDisplay<'a, T> {
+    fn new(tiler: &'a Tiler<T>, t: &'a TCellOwner<T>) -> Self {
         Self { tiler, t }
     }
 }
 
-impl<'a, 'g> Debug for TilerDisplay<'a, 'g> {
+impl<'a, T> Debug for TilerDisplay<'a, T> {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         let active = self.tiler.active_window().map(|window| window.id(self.t));
 

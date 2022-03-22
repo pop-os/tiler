@@ -6,7 +6,6 @@
 extern crate serde;
 
 use async_channel::{Receiver, RecvError, SendError, Sender};
-use ghost_cell::GhostToken;
 use pop_tiler::*;
 use std::thread;
 use thiserror::Error as ThisError;
@@ -80,11 +79,11 @@ pub enum Request {
     WorkspaceUpdate { workspace: u32, display: u32 },
 }
 
-pub struct Service<'g> {
-    tiler: Tiler<'g>,
+pub struct Service<T: 'static> {
+    tiler: Tiler<T>,
 }
 
-impl<'g> Default for Service<'g> {
+impl<T: 'static> Default for Service<T> {
     fn default() -> Self {
         Self {
             tiler: Tiler::default(),
@@ -92,11 +91,11 @@ impl<'g> Default for Service<'g> {
     }
 }
 
-impl<'g> Service<'g> {
+impl<T: 'static> Service<T> {
     pub fn handle<'a>(
         &'a mut self,
         input: Request,
-        t: &'a mut GhostToken<'g>,
+        t: &'a mut TCellOwner<T>,
     ) -> impl Iterator<Item = Event> + 'a {
         let tiler = &mut self.tiler;
 
@@ -187,15 +186,15 @@ impl ClientThread {
 }
 
 /// The pop-tiling service, which you can spawn in a separate thread / local async task
-struct ServiceThread<'g> {
+struct ServiceThread<T: 'static> {
     recv: Receiver<Request>,
     send: Sender<Response>,
-    service: Service<'g>,
-    t: GhostToken<'g>,
+    service: Service<T>,
+    t: TCellOwner<T>,
 }
 
-impl<'g> ServiceThread<'g> {
-    pub fn new(recv: Receiver<Request>, send: Sender<Response>, t: GhostToken<'g>) -> Self {
+impl<T: 'static> ServiceThread<T> {
+    pub fn new(recv: Receiver<Request>, send: Sender<Response>, t: TCellOwner<T>) -> Self {
         Self {
             recv,
             send,
@@ -238,21 +237,21 @@ impl Default for TilerThread {
         let client = ClientThread::new(client_send, client_recv);
 
         thread::spawn(move || {
-            ghost_cell::GhostToken::new(|t| {
-                // Tiling service as a future.
-                let service = async move {
-                    if let Err(why) = ServiceThread::new(server_recv, server_send, t).run().await {
-                        eprintln!("pop-tiler service exited with error: {}", why);
-                    }
-                };
+            let t = TCellOwner::<()>::new();
 
-                // If the type is dropped, a message will be received that stops the service.
-                let drop = async move {
-                    let _ = drop_rx.await;
-                };
+            // Tiling service as a future.
+            let service = async move {
+                if let Err(why) = ServiceThread::new(server_recv, server_send, t).run().await {
+                    eprintln!("pop-tiler service exited with error: {}", why);
+                }
+            };
 
-                async_io::block_on(futures_lite::future::or(drop, service));
-            })
+            // If the type is dropped, a message will be received that stops the service.
+            let drop = async move {
+                let _ = drop_rx.await;
+            };
+
+            async_io::block_on(futures_lite::future::or(drop, service));
         });
 
         Self { client, drop_tx }

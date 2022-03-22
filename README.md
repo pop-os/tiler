@@ -1,6 +1,6 @@
 # Pop Tiler
 
-Generic tiling window manager library for Rust, using an architecture based on [GhostCell](https://plv.mpi-sws.org/rustbelt/ghostcell/paper.pdf).
+Generic tiling window manager library for Rust, using an architecture based on [TCell](https://docs.rs/qcell/latest/qcell/struct.TCell.html).
 
 ## License
 
